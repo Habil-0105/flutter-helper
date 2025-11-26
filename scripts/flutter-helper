@@ -1,0 +1,399 @@
+#!/bin/bash
+set -e
+# --- File to store flavor history ---
+FLAVOR_LIST_FILE="$HOME/.flutter_flavor_list"
+FLAVOR_FILE="$HOME/.flutter_build_flavor"
+
+# --- Function to ensure flavor list file exists ---
+ensure_flavor_list() {
+ if [ ! -f "$FLAVOR_LIST_FILE" ]; then
+  echo "[]" > "$FLAVOR_LIST_FILE"
+ fi
+}
+
+# --- Function to add flavor to list ---
+add_flavor_to_list() {
+ local new_flavor="$1"
+ ensure_flavor_list
+ # Check if flavor already exists
+ if jq -e --arg flavor "$new_flavor" 'index($flavor) != null' "$FLAVOR_LIST_FILE" > /dev/null 2>&1; then
+  return 0
+ fi
+ # Add flavor to list
+ jq --arg flavor "$new_flavor" '. + [$flavor]' "$FLAVOR_LIST_FILE" > "$FLAVOR_LIST_FILE.tmp" && mv "$FLAVOR_LIST_FILE.tmp" "$FLAVOR_LIST_FILE"
+ echo ":white_check_mark: Flavor '$new_flavor' added to history!"
+}
+
+# --- Function to check FVM choice ---
+select_fvm() {
+ echo "Would you like to use FVM (Flutter Version Manager)?"
+ echo "1. Yes, use FVM"
+ echo "2. No, use the default Flutter"
+ read -p "Enter your choice [1-2]: " fvm_choice
+ case $fvm_choice in
+ 1)
+  FLUTTER_CMD="fvm flutter"
+  echo "Using FVM for Flutter commands."
+  ;;
+ 2)
+  FLUTTER_CMD="flutter"
+  echo "Using default Flutter command."
+  ;;
+ *)
+  echo ":x: Invalid option! Defaulting to using the default Flutter command."
+  FLUTTER_CMD="flutter"
+  ;;
+ esac
+}
+
+# --- Function to prompt for flavor with history ---
+prompt_flavor() {
+ ensure_flavor_list
+ echo ""
+ echo "═══════════════════════════════════════"
+ echo "        SELECT BUILD FLAVOR"
+ echo "═══════════════════════════════════════"
+ # Read saved flavors
+ local flavors=($(jq -r '.[]' "$FLAVOR_LIST_FILE" 2>/dev/null || echo ""))
+ if [ "${#flavors[@]}" -gt 0 ]; then
+  echo ":clipboard: Saved flavors:"
+  i=1
+  for flavor in "${flavors[@]}"; do
+   # Mark last used flavor
+   if [ -f "$FLAVOR_FILE" ] && [ "$flavor" = "$(cat "$FLAVOR_FILE")" ]; then
+    echo "  $i) $flavor :star: (last used)"
+   else
+    echo "  $i) $flavor"
+   fi
+   ((i++))
+  done
+  echo "  0) No flavor (skip)"
+  echo "  +) Add new flavor"
+  echo ""
+  read -p "Enter your choice [0-${#flavors[@]} or +]: " choice
+  if [ "$choice" = "+" ]; then
+   read -p "Enter new flavor name: " new_flavor_name
+   if [ -n "$new_flavor_name" ]; then
+    add_flavor_to_list "$new_flavor_name"
+    FLAVOR_NAME="$new_flavor_name"
+    FLAVOR_FLAGS="--flavor $FLAVOR_NAME --dart-define=FLAVOR=$FLAVOR_NAME"
+    echo "$FLAVOR_NAME" > "$FLAVOR_FILE"
+    echo ":white_check_mark: Building with flavor: $FLAVOR_NAME"
+   else
+    echo ":x: Flavor name cannot be empty!"
+    prompt_flavor
+    return
+   fi
+  elif [ "$choice" = "0" ]; then
+   FLAVOR_FLAGS=""
+   FLAVOR_NAME=""
+   echo ":white_check_mark: Building without flavor"
+  elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#flavors[@]}" ]; then
+   FLAVOR_NAME="${flavors[$((choice-1))]}"
+   FLAVOR_FLAGS="--flavor $FLAVOR_NAME --dart-define=FLAVOR=$FLAVOR_NAME"
+   echo "$FLAVOR_NAME" > "$FLAVOR_FILE"
+   echo ":white_check_mark: Building with flavor: $FLAVOR_NAME"
+  else
+   echo ":x: Invalid choice!"
+   prompt_flavor
+   return
+  fi
+ else
+  echo ":information_source:  No saved flavors found."
+  echo ""
+  read -p "Enter flavor name (press Enter to skip): " FLAVOR_NAME
+  if [ -z "$FLAVOR_NAME" ]; then
+   FLAVOR_FLAGS=""
+   echo ":white_check_mark: Building without flavor"
+  else
+   add_flavor_to_list "$FLAVOR_NAME"
+   FLAVOR_FLAGS="--flavor $FLAVOR_NAME --dart-define=FLAVOR=$FLAVOR_NAME"
+   echo "$FLAVOR_NAME" > "$FLAVOR_FILE"
+   echo ":white_check_mark: Building with flavor: $FLAVOR_NAME"
+  fi
+ fi
+ echo "═══════════════════════════════════════"
+ echo ""
+}
+
+# --- Function: Clean Flutter general (shared) ---
+clean_flutter() {
+ echo ":arrows_counterclockwise: Cleaning Flutter project..."
+ $FLUTTER_CMD clean
+ $FLUTTER_CMD pub get
+}
+
+# --- Function: Clean Android specific files ---
+clean_android() {
+ echo ":broom: Cleaning Android project..."
+ cd android
+ ./gradlew clean
+ cd -
+}
+
+# --- Function: Clean iOS specific files ---
+clean_ios() {
+ echo ":broom: Cleaning iOS pods..."
+ cd ios
+ rm -rf Pods/ Podfile.lock
+ pod install
+ pod update
+ pod repo update
+ cd -
+}
+
+# --- Function: Build Android APK ---
+build_android() {
+ echo ":package: Building Android APK..."
+ $FLUTTER_CMD build apk $FLAVOR_FLAGS
+ echo ":white_check_mark: APK build completed!"
+}
+
+PROJECTS_FILE="$HOME/.apk_uploader_projects.json"
+
+ensure_projects_file() {
+ if [ ! -f "$PROJECTS_FILE" ]; then
+  echo "{}" > "$PROJECTS_FILE"
+ fi
+}
+
+choose_project() {
+ ensure_projects_file
+ local ids=($(jq -r 'keys[]' "$PROJECTS_FILE"))
+ if [ "${#ids[@]}" -eq 0 ]; then
+  echo ":memo: No saved projects found. Let's add one."
+  add_new_project
+  return
+ fi
+ echo ":rocket: Choose your app to upload:"
+ i=1
+ for folder_id in "${ids[@]}"; do
+  app_name=$(jq -r --arg id "$folder_id" '.[$id]' "$PROJECTS_FILE")
+  echo "$i) $app_name [$folder_id]"
+  ((i++))
+ done
+ echo ":heavy_plus_sign: Add a new project"
+ read -p "Enter your choice [1-${#ids[@]} or +]: " choice
+ if [ "$choice" = "+" ]; then
+  add_new_project
+ elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#ids[@]}" ]; then
+  GDRIVE_FOLDER_ID="${ids[$((choice-1))]}"
+  APP_NAME=$(jq -r --arg id "$GDRIVE_FOLDER_ID" '.[$id]' "$PROJECTS_FILE")
+ else
+  echo ":x: Invalid choice."
+  return 1
+ fi
+}
+
+add_new_project() {
+ read -p "Enter Google Drive Folder ID: " new_folder_id
+ read -p "Enter App Name: " new_app_name
+ # Check if folder ID already exists
+ if jq -e --arg id "$new_folder_id" 'has($id)' "$PROJECTS_FILE" > /dev/null; then
+  echo ":warning:  This folder ID is already saved."
+  return 1
+ fi
+ jq --arg id "$new_folder_id" --arg name "$new_app_name" '. + {($id): $name}' "$PROJECTS_FILE" > "$PROJECTS_FILE.tmp" && mv "$PROJECTS_FILE.tmp" "$PROJECTS_FILE"
+ GDRIVE_FOLDER_ID="$new_folder_id"
+ APP_NAME="$new_app_name"
+ echo ":white_check_mark: Project saved!"
+}
+
+# --- Function: Upload APK to Google Drive ---
+upload_apk_to_drive() {
+ echo ":lightning:  Preparing to upload APK to Google Drive..."
+ # Validate environment variable
+ if [ -z "$GDRIVE_ACCOUNT_FILE" ]; then
+  echo ":x: GDRIVE_ACCOUNT_FILE environment variable is not set!"
+  echo "Please add 'export GDRIVE_ACCOUNT_FILE=your_file_path' to your ~/.zshrc"
+  return 1
+ fi
+ # Install gdrive if not installed
+ if ! command -v gdrive &> /dev/null; then
+  echo ":arrow_down_small:  Installing gdrive..."
+  curl -L -o gdrive.tar.gz https://github.com/glotlabs/gdrive/releases/download/3.9.1/gdrive_linux-x64.tar.gz
+  tar -xzf gdrive.tar.gz
+  chmod +x gdrive
+  sudo mv gdrive /usr/local/bin/
+ fi
+ # Check if gdrive account already exists
+ if ! gdrive about &>/dev/null; then
+  echo ":key: Importing gdrive account..."
+  gdrive account import "$GDRIVE_ACCOUNT_FILE"
+ else
+  echo ":white_check_mark: gdrive account already imported."
+ fi
+ 
+ # Extract app version from pubspec.yaml
+ app_version=""
+ if [ -f "pubspec.yaml" ]; then
+  app_version=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d'+' -f1)
+  if [ -n "$app_version" ]; then
+   echo ":label: App version: $app_version"
+  fi
+ fi
+ 
+ # Determine APK path based on flavor
+ if [ -z "$FLAVOR_NAME" ]; then
+  apk_path="build/app/outputs/flutter-apk/app-release.apk"
+ else
+  apk_path="build/app/outputs/flutter-apk/app-${FLAVOR_NAME}-release.apk"
+ fi
+ date_str=$(date +%d-%m-%Y)
+ # Build filename with custom name, flavor, and version
+ filename_parts="${APP_NAME}"
+ if [ -n "$CUSTOM_NAME" ]; then
+  filename_parts="${filename_parts} ${CUSTOM_NAME}"
+ fi
+ if [ -n "$FLAVOR_NAME" ]; then
+  filename_parts="${filename_parts} ${FLAVOR_NAME}"
+ fi
+ if [ -n "$app_version" ]; then
+  renamed_apk="build/app/outputs/flutter-apk/${filename_parts} v${app_version} (${date_str}).apk"
+ else
+  renamed_apk="build/app/outputs/flutter-apk/${filename_parts} (${date_str}).apk"
+ fi
+ if [ ! -f "$apk_path" ]; then
+  echo ":x: APK not found at $apk_path"
+  return 1
+ fi
+ mv "$apk_path" "$renamed_apk"
+ echo ":arrow_up_small: Uploading $renamed_apk..."
+ upload_output=$(gdrive files upload --parent "$GDRIVE_FOLDER_ID" "$renamed_apk")
+ echo "$upload_output"
+ # Extract file ID from the upload output
+ file_id=$(echo "$upload_output" | grep 'Id:' | awk '{print $2}')
+ if [ -z "$file_id" ]; then
+  echo ":x: Failed to retrieve file ID."
+  return 1
+ fi
+ share_output=$(gdrive permissions share "$file_id")
+ echo "$share_output"
+ file_url="https://drive.google.com/file/d/$file_id/view"
+ echo ":link: Download Link: $file_url"
+
+ if command -v pbcopy &>/dev/null; then
+  echo "$file_url" | pbcopy
+  echo ":clipboard:  Link copied to clipboard!"
+ elif command -v xclip &>/dev/null; then
+  echo "$file_url" | xclip -selection clipboard
+  echo ":clipboard:  Link copied to clipboard!"
+ elif command -v xsel &>/dev/null; then
+  echo "$file_url" | xsel --clipboard --input
+  echo ":clipboard:  Link copied to clipboard!"
+ else
+  echo ":warning: Clipboard tool not found. Install pbcopy/xclip/xsel to auto-copy."
+ fi
+
+ # Delete local APK file after successful upload
+ echo ":wastebasket:  Deleting local APK file..."
+ if rm "$renamed_apk"; then
+  echo ":white_check_mark: Local APK file deleted successfully!"
+ else
+  echo ":warning:  Failed to delete local APK file."
+ fi
+}
+
+# --- Function: Build Android App Bundle ---
+build_appbundle() {
+ echo ":package: Building Android App Bundle..."
+ $FLUTTER_CMD build appbundle $FLAVOR_FLAGS
+ echo ":white_check_mark: App Bundle build completed!"
+}
+
+# --- Function: Build iOS IPA ---
+build_ios() {
+ echo ":package: Building iOS IPA..."
+ $FLUTTER_CMD build ipa $FLAVOR_FLAGS
+ echo ":white_check_mark: IPA build completed!"
+}
+
+# --- First Menu: Select FVM ---
+select_fvm
+
+# --- Second Menu: Choose What to Do ---
+show_menu() {
+ echo ""
+ echo "═══════════════════════════════════════"
+ echo "     FLUTTER BUILD AUTOMATION MENU"
+ echo "═══════════════════════════════════════"
+ echo "1.  Clean and get dependencies Flutter"
+ echo "2.  Clean Android project only"
+ echo "3.  Clean iOS project only"
+ echo "4.  Build Android APK"
+ echo "5.  Build Android APK and Upload to Google Drive"
+ echo "6.  Build Android App Bundle"
+ echo "7.  Build iOS IPA"
+ echo "8.  Clean ALL (Flutter, Android, iOS)"
+ echo "9.  Build ALL (Android + iOS)"
+ echo "10. Quit"
+ echo "═══════════════════════════════════════"
+ read -p "Enter your choice [1-10]: " choice
+}
+
+# --- Main Logic ---
+while true; do
+ show_menu
+ case $choice in
+ 1)
+  clean_flutter
+  ;;
+ 2)
+  clean_android
+  ;;
+ 3)
+  clean_ios
+  ;;
+ 4)
+  prompt_flavor
+  clean_flutter
+  build_android
+  ;;
+ 5)
+  choose_project || break
+  read -p "Enter custom name (optional, press Enter to skip): " CUSTOM_NAME
+  if [ -z "$CUSTOM_NAME" ]; then
+   CUSTOM_NAME=""
+  else
+   echo ":label: Custom name: $CUSTOM_NAME"
+  fi
+  prompt_flavor
+  clean_flutter
+  build_android
+  upload_apk_to_drive
+  clean_flutter
+  ;;
+ 6)
+  prompt_flavor
+  clean_flutter
+  build_appbundle
+  ;;
+ 7)
+  prompt_flavor
+  clean_flutter
+  clean_ios
+  build_ios
+  ;;
+ 8)
+  clean_flutter
+  clean_android
+  clean_ios
+  ;;
+ 9)
+  prompt_flavor
+  clean_flutter
+  clean_android
+  clean_ios
+  build_android
+  build_appbundle
+  build_ios
+  ;;
+ 10)
+  echo ":wave: Exiting..."
+  break
+  ;;
+ *)
+  echo ":x: Invalid option! Please choose a valid option."
+  ;;
+ esac
+done
