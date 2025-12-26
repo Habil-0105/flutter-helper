@@ -116,6 +116,57 @@ prompt_flavor() {
  echo ""
 }
 
+# --- Function to select multiple flavors ---
+prompt_multiple_flavors() {
+ ensure_flavor_list
+ echo ""
+ echo "═══════════════════════════════════════"
+ echo "    SELECT MULTIPLE BUILD FLAVORS"
+ echo "═══════════════════════════════════════"
+ # Read saved flavors
+ local flavors=($(jq -r '.[]' "$FLAVOR_LIST_FILE" 2>/dev/null || echo ""))
+ if [ "${#flavors[@]}" -eq 0 ]; then
+  echo ":x: No saved flavors found. Please add flavors first."
+  return 1
+ fi
+ 
+ echo ":clipboard: Available flavors:"
+ i=1
+ for flavor in "${flavors[@]}"; do
+  echo "  $i) $flavor"
+  ((i++))
+ done
+ echo ""
+ echo "Enter flavor numbers separated by spaces (e.g., 1 3 5)"
+ echo "Or enter 'all' to build all flavors"
+ read -p "Your selection: " selection
+ 
+ SELECTED_FLAVORS=()
+ 
+ if [ "$selection" = "all" ]; then
+  SELECTED_FLAVORS=("${flavors[@]}")
+  echo ":white_check_mark: Selected all flavors: ${SELECTED_FLAVORS[*]}"
+ else
+  for num in $selection; do
+   if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le "${#flavors[@]}" ]; then
+    SELECTED_FLAVORS+=("${flavors[$((num-1))]}")
+   else
+    echo ":warning: Skipping invalid selection: $num"
+   fi
+  done
+  
+  if [ "${#SELECTED_FLAVORS[@]}" -eq 0 ]; then
+   echo ":x: No valid flavors selected!"
+   return 1
+  fi
+  
+  echo ":white_check_mark: Selected flavors: ${SELECTED_FLAVORS[*]}"
+ fi
+ 
+ echo "═══════════════════════════════════════"
+ echo ""
+}
+
 # --- Function: Clean Flutter general (shared) ---
 clean_flutter() {
  echo ":arrows_counterclockwise: Cleaning Flutter project..."
@@ -147,6 +198,252 @@ build_android() {
  echo ":package: Building Android APK..."
  $FLUTTER_CMD build apk $FLAVOR_FLAGS
  echo ":white_check_mark: APK build completed!"
+}
+
+# --- Function: Build multiple Android APKs ---
+build_multiple_android_apks() {
+ echo ""
+ echo ":rocket: Building multiple Android APKs..."
+ echo ""
+ 
+ # Create output directory for organized builds
+ OUTPUT_DIR="build/app/outputs/flutter-apk/multi-flavor"
+ mkdir -p "$OUTPUT_DIR"
+ 
+ local success_count=0
+ local total_count=${#SELECTED_FLAVORS[@]}
+ BUILT_APKS=()
+ 
+ for flavor in "${SELECTED_FLAVORS[@]}"; do
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ":package: Building flavor: $flavor ($((success_count + 1))/$total_count)"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  if $FLUTTER_CMD build apk --flavor "$flavor" --dart-define=FLAVOR="$flavor"; then
+   # Move and rename the APK
+   source_apk="build/app/outputs/flutter-apk/app-${flavor}-release.apk"
+   if [ -f "$source_apk" ]; then
+    cp "$source_apk" "$OUTPUT_DIR/app-${flavor}-release.apk"
+    BUILT_APKS+=("$OUTPUT_DIR/app-${flavor}-release.apk:$flavor")
+    echo ":white_check_mark: APK for $flavor saved to $OUTPUT_DIR"
+    ((success_count++))
+   else
+    echo ":warning: APK not found for $flavor at $source_apk"
+   fi
+  else
+   echo ":x: Failed to build $flavor"
+  fi
+  echo ""
+ done
+ 
+ echo "═══════════════════════════════════════"
+ echo ":tada: Multi-flavor build completed!"
+ echo "Success: $success_count/$total_count"
+ echo "Output directory: $OUTPUT_DIR"
+ echo "═══════════════════════════════════════"
+}
+
+# --- Function: Upload multiple APKs to Google Drive ---
+upload_multiple_apks_to_drive() {
+ echo ":lightning: Preparing to upload multiple APKs to Google Drive..."
+ 
+ # Validate environment variable
+ if [ -z "$GDRIVE_ACCOUNT_FILE" ]; then
+  echo ":x: GDRIVE_ACCOUNT_FILE environment variable is not set!"
+  echo "Please add 'export GDRIVE_ACCOUNT_FILE=your_file_path' to your ~/.zshrc"
+  return 1
+ fi
+ 
+ # Install gdrive if not installed
+ if ! command -v gdrive &> /dev/null; then
+  echo ":arrow_down_small: Installing gdrive..."
+  curl -L -o gdrive.tar.gz https://github.com/glotlabs/gdrive/releases/download/3.9.1/gdrive_linux-x64.tar.gz
+  tar -xzf gdrive.tar.gz
+  chmod +x gdrive
+  sudo mv gdrive /usr/local/bin/
+ fi
+ 
+ # Check if gdrive account already exists
+ if ! gdrive about &>/dev/null; then
+  echo ":key: Importing gdrive account..."
+  gdrive account import "$GDRIVE_ACCOUNT_FILE"
+ else
+  echo ":white_check_mark: gdrive account already imported."
+ fi
+ 
+ # Extract app version from pubspec.yaml
+ app_version=""
+ if [ -f "pubspec.yaml" ]; then
+  app_version=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d'+' -f1)
+  if [ -n "$app_version" ]; then
+   echo ":label: App version: $app_version"
+  fi
+ fi
+ 
+ date_str=$(date +%d-%m-%Y)
+ local upload_count=0
+ UPLOAD_LINKS=()
+ 
+ for apk_info in "${BUILT_APKS[@]}"; do
+  apk_path="${apk_info%%:*}"
+  flavor_name="${apk_info##*:}"
+  
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ":arrow_up_small: Uploading flavor: $flavor_name"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  # Build filename
+  filename_parts="${APP_NAME}"
+  if [ -n "$CUSTOM_NAME" ]; then
+   filename_parts="${filename_parts} ${CUSTOM_NAME}"
+  fi
+  filename_parts="${filename_parts} ${flavor_name}"
+  
+  if [ -n "$app_version" ]; then
+   renamed_apk="${apk_path%/*}/${filename_parts} v${app_version} (${date_str}).apk"
+  else
+   renamed_apk="${apk_path%/*}/${filename_parts} (${date_str}).apk"
+  fi
+  
+  if [ ! -f "$apk_path" ]; then
+   echo ":x: APK not found at $apk_path"
+   continue
+  fi
+  
+  cp "$apk_path" "$renamed_apk"
+  
+  echo "Uploading: $(basename "$renamed_apk")"
+  upload_output=$(gdrive files upload --parent "$GDRIVE_FOLDER_ID" "$renamed_apk")
+  
+  # Extract file ID from the upload output
+  file_id=$(echo "$upload_output" | grep 'Id:' | awk '{print $2}')
+  
+  if [ -z "$file_id" ]; then
+   echo ":x: Failed to retrieve file ID for $flavor_name"
+   rm "$renamed_apk"
+   continue
+  fi
+  
+  gdrive permissions share "$file_id" > /dev/null 2>&1
+  file_url="https://drive.google.com/file/d/$file_id/view"
+  
+  echo ":white_check_mark: Uploaded: $flavor_name"
+  echo ":link: Link: $file_url"
+  
+  UPLOAD_LINKS+=("$flavor_name: $file_url")
+  
+  # Delete renamed APK
+  rm "$renamed_apk"
+  ((upload_count++))
+ done
+ 
+ echo ""
+ echo "═══════════════════════════════════════"
+ echo ":tada: Upload completed!"
+ echo "Uploaded: $upload_count/${#BUILT_APKS[@]}"
+ echo "═══════════════════════════════════════"
+ echo ""
+ echo ":link: Download Links:"
+ for link in "${UPLOAD_LINKS[@]}"; do
+  echo "  • $link"
+ done
+ echo ""
+ 
+ # Copy all links to clipboard
+ all_links=$(printf "%s\n" "${UPLOAD_LINKS[@]}")
+ if command -v pbcopy &>/dev/null; then
+  echo "$all_links" | pbcopy
+  echo ":clipboard: All links copied to clipboard!"
+ elif command -v xclip &>/dev/null; then
+  echo "$all_links" | xclip -selection clipboard
+  echo ":clipboard: All links copied to clipboard!"
+ elif command -v xsel &>/dev/null; then
+  echo "$all_links" | xsel --clipboard --input
+  echo ":clipboard: All links copied to clipboard!"
+ fi
+}
+
+# --- Function: Build multiple Android App Bundles ---
+build_multiple_appbundles() {
+ echo ""
+ echo ":rocket: Building multiple Android App Bundles..."
+ echo ""
+ 
+ # Create output directory for organized builds
+ OUTPUT_DIR="build/app/outputs/bundle/multi-flavor"
+ mkdir -p "$OUTPUT_DIR"
+ 
+ local success_count=0
+ local total_count=${#SELECTED_FLAVORS[@]}
+ 
+ for flavor in "${SELECTED_FLAVORS[@]}"; do
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ":package: Building App Bundle for flavor: $flavor ($((success_count + 1))/$total_count)"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  if $FLUTTER_CMD build appbundle --flavor "$flavor" --dart-define=FLAVOR="$flavor"; then
+   # Move and rename the App Bundle
+   source_aab="build/app/outputs/bundle/${flavor}Release/app-${flavor}-release.aab"
+   if [ -f "$source_aab" ]; then
+    cp "$source_aab" "$OUTPUT_DIR/app-${flavor}-release.aab"
+    echo ":white_check_mark: App Bundle for $flavor saved to $OUTPUT_DIR"
+    ((success_count++))
+   else
+    echo ":warning: App Bundle not found for $flavor at $source_aab"
+   fi
+  else
+   echo ":x: Failed to build App Bundle for $flavor"
+  fi
+  echo ""
+ done
+ 
+ echo "═══════════════════════════════════════"
+ echo ":tada: Multi-flavor App Bundle build completed!"
+ echo "Success: $success_count/$total_count"
+ echo "Output directory: $OUTPUT_DIR"
+ echo "═══════════════════════════════════════"
+}
+
+# --- Function: Build multiple iOS IPAs ---
+build_multiple_ios_ipas() {
+ echo ""
+ echo ":rocket: Building multiple iOS IPAs..."
+ echo ""
+ 
+ # Create output directory for organized builds
+ OUTPUT_DIR="build/ios/ipa/multi-flavor"
+ mkdir -p "$OUTPUT_DIR"
+ 
+ local success_count=0
+ local total_count=${#SELECTED_FLAVORS[@]}
+ 
+ for flavor in "${SELECTED_FLAVORS[@]}"; do
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ":package: Building flavor: $flavor ($((success_count + 1))/$total_count)"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  if $FLUTTER_CMD build ipa --flavor "$flavor" --dart-define=FLAVOR="$flavor"; then
+   # Find and move the IPA (iOS uses a different structure)
+   source_ipa=$(find build/ios/ipa -name "*.ipa" -type f | head -n 1)
+   if [ -n "$source_ipa" ]; then
+    cp "$source_ipa" "$OUTPUT_DIR/app-${flavor}.ipa"
+    echo ":white_check_mark: IPA for $flavor saved to $OUTPUT_DIR"
+    ((success_count++))
+   else
+    echo ":warning: IPA not found for $flavor"
+   fi
+  else
+   echo ":x: Failed to build $flavor"
+  fi
+  echo ""
+ done
+ 
+ echo "═══════════════════════════════════════"
+ echo ":tada: Multi-flavor build completed!"
+ echo "Success: $success_count/$total_count"
+ echo "Output directory: $OUTPUT_DIR"
+ echo "═══════════════════════════════════════"
 }
 
 PROJECTS_FILE="$HOME/.apk_uploader_projects.json"
@@ -324,11 +621,15 @@ show_menu() {
  echo "5.  Build Android APK and Upload to Google Drive"
  echo "6.  Build Android App Bundle"
  echo "7.  Build iOS IPA"
- echo "8.  Clean ALL (Flutter, Android, iOS)"
- echo "9.  Build ALL (Android + iOS)"
- echo "10. Quit"
+ echo "8.  Build multiple Android APKs (multi-flavor)"
+ echo "9.  Build multiple Android APKs and Upload (multi-flavor)"
+ echo "10. Build multiple Android App Bundles (multi-flavor)"
+ echo "11. Build multiple iOS IPAs (multi-flavor)"
+ echo "12. Clean ALL (Flutter, Android, iOS)"
+ echo "13. Build ALL (Android + iOS)"
+ echo "14. Quit"
  echo "═══════════════════════════════════════"
- read -p "Enter your choice [1-10]: " choice
+ read -p "Enter your choice [1-14]: " choice
 }
 
 # --- Main Logic ---
@@ -375,11 +676,35 @@ while true; do
   build_ios
   ;;
  8)
+  prompt_multiple_flavors || continue
+  clean_flutter
+  build_multiple_android_apks
+  ;;
+ 9)
+  choose_project || continue
+  prompt_multiple_flavors || continue
+  clean_flutter
+  build_multiple_android_apks
+  upload_multiple_apks_to_drive
+  clean_flutter
+  ;;
+ 10)
+  prompt_multiple_flavors || continue
+  clean_flutter
+  build_multiple_appbundles
+  ;;
+ 11)
+  prompt_multiple_flavors || continue
+  clean_flutter
+  clean_ios
+  build_multiple_ios_ipas
+  ;;
+ 12)
   clean_flutter
   clean_android
   clean_ios
   ;;
- 9)
+ 13)
   prompt_flavor
   clean_flutter
   clean_android
@@ -388,7 +713,7 @@ while true; do
   build_appbundle
   build_ios
   ;;
- 10)
+ 14)
   echo ":wave: Exiting..."
   break
   ;;
