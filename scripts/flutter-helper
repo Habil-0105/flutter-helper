@@ -4,27 +4,133 @@ set -e
 FLAVOR_LIST_FILE="$HOME/.flutter_flavor_list"
 FLAVOR_FILE="$HOME/.flutter_build_flavor"
 
+# --- Function: Validate Flutter project ---
+validate_flutter_project() {
+ if [ ! -f "pubspec.yaml" ]; then
+  echo ":x: Error: Not a Flutter project! (pubspec.yaml not found)"
+  echo "Please run this script from a Flutter project directory."
+  exit 1
+ fi
+}
+
+# --- Function: Validate Flutter/FVM installation ---
+validate_flutter_installation() {
+ local cmd="$1"
+ if ! command -v $cmd &> /dev/null; then
+  echo ":x: Error: $cmd is not installed or not in PATH!"
+  if [ "$cmd" = "fvm" ]; then
+   echo "Please install FVM: https://fvm.app/docs/getting_started/installation"
+  else
+   echo "Please install Flutter: https://flutter.dev/docs/get-started/install"
+  fi
+  exit 1
+ fi
+}
+
+# --- Function: Get project root folder name ---
+get_project_name() {
+ basename "$(pwd)"
+}
+
+# --- Function: Validate flavor exists in project ---
+validate_flavor() {
+ local flavor="$1"
+ 
+ if [ -z "$flavor" ]; then
+  return 0  # No flavor is valid
+ fi
+ 
+ # Check flavorizr.yaml (primary source for flavorizr package)
+ if [ -f "flavorizr.yaml" ]; then
+  # Check if flavor exists in flavorizr.yaml
+  # flavorizr.yaml typically has flavors defined under a 'flavors' key
+  if grep -q "$flavor" flavorizr.yaml 2>/dev/null; then
+   # More specific check: look for the flavor name as a key or in flavor definitions
+   if grep -E "^[[:space:]]*$flavor[[:space:]]*:" flavorizr.yaml 2>/dev/null || \
+      grep -E "[[:space:]]*$flavor[[:space:]]*:" flavorizr.yaml 2>/dev/null; then
+    return 0  # Flavor found in flavorizr.yaml
+   fi
+   # Also check if it's in a list format
+   if grep -E "['\"]$flavor['\"]" flavorizr.yaml 2>/dev/null; then
+    return 0
+   fi
+  fi
+ fi
+ 
+ # Check pubspec.yaml for flavorizr configuration
+ if [ -f "pubspec.yaml" ]; then
+  # Check if flavorizr is configured and flavor is mentioned
+  if grep -q "flavorizr" pubspec.yaml 2>/dev/null; then
+   # Check if flavor name appears in pubspec.yaml (might be in flavorizr config)
+   if grep -q "$flavor" pubspec.yaml 2>/dev/null; then
+    return 0  # Flavor found in pubspec.yaml
+   fi
+  fi
+ fi
+ 
+ # Check android/app/flavorizr.gradle (Android flavorizr generated file)
+ if [ -f "android/app/flavorizr.gradle" ]; then
+  if grep -q "$flavor" android/app/flavorizr.gradle 2>/dev/null; then
+   return 0  # Flavor found in flavorizr.gradle
+  fi
+ fi
+ 
+ # Fallback: Check Android flavors in build.gradle (for non-flavorizr projects)
+ if [ -f "android/app/build.gradle" ]; then
+  # Look for productFlavors block and check if flavor name appears within it
+  if grep -q "productFlavors" android/app/build.gradle; then
+   # Extract the productFlavors section and check if flavor name appears within it
+   if awk '/productFlavors\s*\{/,/^[[:space:]]*\}/ { if (index($0, "'"$flavor"'")) found=1 } END { exit !found }' android/app/build.gradle 2>/dev/null; then
+    return 0  # Flavor found in Android productFlavors
+   fi
+  fi
+ fi
+ 
+ # Check iOS - look for flavor in Xcode project files or Info.plist
+ # iOS flavor validation is more complex, so we'll check common locations
+ if [ -d "ios" ]; then
+  # Check if flavor appears in any iOS configuration files
+  # This is a lenient check - if Android doesn't exist, we assume iOS might have it
+  if [ ! -d "android" ]; then
+   # iOS-only project - be lenient and assume flavor might be valid
+   return 0
+  fi
+ fi
+ 
+ # If we reach here and Android exists but flavor not found, it's invalid
+ if [ -d "android" ]; then
+  return 1  # Flavor not found in Android project
+ fi
+ 
+ # Default: assume valid if we can't determine (for edge cases)
+ return 0
+}
+
 # --- Function: Send cross-platform notification ---
 send_notification() {
  local title="$1"
  local message="$2"
  local sound="${3:-true}"
+ local project_name=$(get_project_name)
+ 
+ # Add project name to title
+ local full_title="$title - $project_name"
  
  # Detect OS
  if [[ "$OSTYPE" == "darwin"* ]]; then
   # macOS - use osascript
   if [ "$sound" = "true" ]; then
-   osascript -e "display notification \"$message\" with title \"$title\" sound name \"Glass\""
+   osascript -e "display notification \"$message\" with title \"$full_title\" sound name \"Glass\""
   else
-   osascript -e "display notification \"$message\" with title \"$title\""
+   osascript -e "display notification \"$message\" with title \"$full_title\""
   fi
  elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
   # Linux - use notify-send
   if command -v notify-send &> /dev/null; then
    if [ "$sound" = "true" ]; then
-    notify-send -u normal -i "dialog-information" "$title" "$message"
+    notify-send -u normal -i "dialog-information" "$full_title" "$message"
    else
-    notify-send -u normal -i "dialog-information" "$title" "$message"
+    notify-send -u normal -i "dialog-information" "$full_title" "$message"
    fi
   fi
  fi
@@ -59,15 +165,18 @@ select_fvm() {
  case $fvm_choice in
  1)
   FLUTTER_CMD="fvm flutter"
+  validate_flutter_installation "fvm"
   echo "Using FVM for Flutter commands."
   ;;
  2)
   FLUTTER_CMD="flutter"
+  validate_flutter_installation "flutter"
   echo "Using default Flutter command."
   ;;
  *)
   echo ":x: Invalid option! Defaulting to using the default Flutter command."
   FLUTTER_CMD="flutter"
+  validate_flutter_installation "flutter"
   ;;
  esac
 }
@@ -140,6 +249,15 @@ prompt_flavor() {
  fi
  echo "═══════════════════════════════════════"
  echo ""
+ 
+ # Validate selected flavor exists in current project
+ if [ -n "$FLAVOR_NAME" ]; then
+  if ! validate_flavor "$FLAVOR_NAME"; then
+   echo ":x: Error: Flavor '$FLAVOR_NAME' does not exist in the current project!"
+   echo "Please check your Android build.gradle or iOS configuration."
+   exit 1
+  fi
+ fi
 }
 
 # --- Function to select multiple flavors ---
@@ -165,6 +283,7 @@ prompt_multiple_flavors() {
  echo ""
  echo "Enter flavor numbers separated by spaces (e.g., 1 3 5)"
  echo "Or enter 'all' to build all flavors"
+ echo "Or enter '+' to add a new flavor"
  read -p "Your selection: " selection
  
  SELECTED_FLAVORS=()
@@ -172,6 +291,20 @@ prompt_multiple_flavors() {
  if [ "$selection" = "all" ]; then
   SELECTED_FLAVORS=("${flavors[@]}")
   echo ":white_check_mark: Selected all flavors: ${SELECTED_FLAVORS[*]}"
+ elif [ "$selection" = "+" ]; then
+  read -p "Enter new flavor name: " new_flavor_name
+  if [ -z "$new_flavor_name" ]; then
+   echo ":x: Flavor name cannot be empty!"
+   # Show list again
+   prompt_multiple_flavors
+   return
+  fi
+  add_flavor_to_list "$new_flavor_name"
+  echo ":white_check_mark: Flavor '$new_flavor_name' added to history!"
+  echo ""
+  # Show the list again so user can select flavors
+  prompt_multiple_flavors
+  return
  else
   for num in $selection; do
    if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le "${#flavors[@]}" ]; then
@@ -189,6 +322,32 @@ prompt_multiple_flavors() {
   echo ":white_check_mark: Selected flavors: ${SELECTED_FLAVORS[*]}"
  fi
  
+ # Validate and filter flavors that exist in current project
+ local original_count=${#SELECTED_FLAVORS[@]}
+ VALID_FLAVORS=()
+ for flavor in "${SELECTED_FLAVORS[@]}"; do
+  if validate_flavor "$flavor"; then
+   VALID_FLAVORS+=("$flavor")
+  else
+   echo ":warning: Flavor '$flavor' does not exist in current project. Removing from selection."
+  fi
+ done
+ 
+ # Update SELECTED_FLAVORS with only valid flavors
+ SELECTED_FLAVORS=("${VALID_FLAVORS[@]}")
+ 
+ # Check if any valid flavors remain
+ if [ "${#SELECTED_FLAVORS[@]}" -eq 0 ]; then
+  echo ":x: Error: No valid flavors found in the current project!"
+  echo "All selected flavors were removed. Please check your project configuration."
+  return 1
+ fi
+ 
+ # Show message if some flavors were filtered out
+ if [ "${#SELECTED_FLAVORS[@]}" -lt "$original_count" ]; then
+  echo ":white_check_mark: Valid flavors after filtering: ${SELECTED_FLAVORS[*]}"
+ fi
+ 
  echo "═══════════════════════════════════════"
  echo ""
 }
@@ -196,26 +355,45 @@ prompt_multiple_flavors() {
 # --- Function: Clean Flutter general (shared) ---
 clean_flutter() {
  echo ":arrows_counterclockwise: Cleaning Flutter project..."
- $FLUTTER_CMD clean
- $FLUTTER_CMD pub get
+ if ! $FLUTTER_CMD clean; then
+  echo ":warning: Flutter clean had issues, but continuing..."
+ fi
+ if ! $FLUTTER_CMD pub get; then
+  echo ":x: Failed to get dependencies!"
+  return 1
+ fi
 }
 
 # --- Function: Clean Android specific files ---
 clean_android() {
+ if [ ! -d "android" ]; then
+  echo ":warning: Android directory not found. Skipping Android clean."
+  return 0
+ fi
  echo ":broom: Cleaning Android project..."
  cd android
- ./gradlew clean
+ if [ -f "gradlew" ]; then
+  ./gradlew clean
+ else
+  echo ":warning: gradlew not found. Skipping gradle clean."
+ fi
  cd -
 }
 
 # --- Function: Clean iOS specific files ---
 clean_ios() {
+ if [ ! -d "ios" ]; then
+  echo ":warning: iOS directory not found. Skipping iOS clean."
+  return 0
+ fi
  echo ":broom: Cleaning iOS pods..."
  cd ios
- rm -rf Pods/ Podfile.lock
- pod install
- pod update
- pod repo update
+ if [ -f "Podfile" ]; then
+  rm -rf Pods/ Podfile.lock
+  pod install
+ else
+  echo ":warning: Podfile not found. Skipping pod operations."
+ fi
  cd -
 }
 
@@ -358,7 +536,15 @@ upload_multiple_apks_to_drive() {
   cp "$apk_path" "$renamed_apk"
   
   echo "Uploading: $(basename "$renamed_apk")"
-  upload_output=$(gdrive files upload --parent "$GDRIVE_FOLDER_ID" "$renamed_apk")
+  upload_output=$(gdrive files upload --parent "$GDRIVE_FOLDER_ID" "$renamed_apk" 2>&1)
+  upload_exit_code=$?
+  
+  # Check if upload failed
+  if [ $upload_exit_code -ne 0 ]; then
+   echo ":x: Upload failed for $flavor_name (exit code: $upload_exit_code)"
+   rm "$renamed_apk"
+   continue
+  fi
   
   # Extract file ID from the upload output
   file_id=$(echo "$upload_output" | grep 'Id:' | awk '{print $2}')
@@ -627,16 +813,33 @@ upload_apk_to_drive() {
  fi
  mv "$apk_path" "$renamed_apk"
  echo ":arrow_up_small: Uploading $renamed_apk..."
- upload_output=$(gdrive files upload --parent "$GDRIVE_FOLDER_ID" "$renamed_apk")
+ upload_output=$(gdrive files upload --parent "$GDRIVE_FOLDER_ID" "$renamed_apk" 2>&1)
+ upload_exit_code=$?
  echo "$upload_output"
+ 
+ # Check if upload failed
+ if [ $upload_exit_code -ne 0 ]; then
+  echo ":x: Upload failed with exit code $upload_exit_code"
+  send_notification "Google Drive Upload" "APK upload failed!" "false"
+  return 1
+ fi
+ 
  # Extract file ID from the upload output
  file_id=$(echo "$upload_output" | grep 'Id:' | awk '{print $2}')
  if [ -z "$file_id" ]; then
-  echo ":x: Failed to retrieve file ID."
+  echo ":x: Failed to retrieve file ID from upload output."
+  send_notification "Google Drive Upload" "APK upload failed - could not get file ID!" "false"
   return 1
  fi
- share_output=$(gdrive permissions share "$file_id")
+ 
+ share_output=$(gdrive permissions share "$file_id" 2>&1)
+ share_exit_code=$?
  echo "$share_output"
+ 
+ if [ $share_exit_code -ne 0 ]; then
+  echo ":warning: Failed to share file, but upload may have succeeded."
+ fi
+ 
  file_url="https://drive.google.com/file/d/$file_id/view"
  echo ":link: Download Link: $file_url"
 
@@ -700,6 +903,9 @@ build_ios() {
   return 1
  fi
 }
+
+# --- Validate we're in a Flutter project ---
+validate_flutter_project
 
 # --- First Menu: Select FVM ---
 select_fvm
