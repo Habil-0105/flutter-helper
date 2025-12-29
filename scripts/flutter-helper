@@ -4,6 +4,32 @@ set -e
 FLAVOR_LIST_FILE="$HOME/.flutter_flavor_list"
 FLAVOR_FILE="$HOME/.flutter_build_flavor"
 
+# --- Function: Send cross-platform notification ---
+send_notification() {
+ local title="$1"
+ local message="$2"
+ local sound="${3:-true}"
+ 
+ # Detect OS
+ if [[ "$OSTYPE" == "darwin"* ]]; then
+  # macOS - use osascript
+  if [ "$sound" = "true" ]; then
+   osascript -e "display notification \"$message\" with title \"$title\" sound name \"Glass\""
+  else
+   osascript -e "display notification \"$message\" with title \"$title\""
+  fi
+ elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+  # Linux - use notify-send
+  if command -v notify-send &> /dev/null; then
+   if [ "$sound" = "true" ]; then
+    notify-send -u normal -i "dialog-information" "$title" "$message"
+   else
+    notify-send -u normal -i "dialog-information" "$title" "$message"
+   fi
+  fi
+ fi
+}
+
 # --- Function to ensure flavor list file exists ---
 ensure_flavor_list() {
  if [ ! -f "$FLAVOR_LIST_FILE" ]; then
@@ -196,8 +222,17 @@ clean_ios() {
 # --- Function: Build Android APK ---
 build_android() {
  echo ":package: Building Android APK..."
- $FLUTTER_CMD build apk $FLAVOR_FLAGS
- echo ":white_check_mark: APK build completed!"
+ if $FLUTTER_CMD build apk $FLAVOR_FLAGS; then
+  echo ":white_check_mark: APK build completed!"
+  local flavor_msg=""
+  if [ -n "$FLAVOR_NAME" ]; then
+   flavor_msg=" (Flavor: $FLAVOR_NAME)"
+  fi
+  send_notification "Flutter Build" "Android APK build completed successfully!$flavor_msg"
+ else
+  send_notification "Flutter Build" "Android APK build failed!" "false"
+  return 1
+ fi
 }
 
 # --- Function: Build multiple Android APKs ---
@@ -241,6 +276,15 @@ build_multiple_android_apks() {
  echo "Success: $success_count/$total_count"
  echo "Output directory: $OUTPUT_DIR"
  echo "═══════════════════════════════════════"
+ 
+ # Send notification
+ if [ "$success_count" -eq "$total_count" ]; then
+  send_notification "Flutter Build" "All $total_count Android APK builds completed successfully!"
+ elif [ "$success_count" -gt 0 ]; then
+  send_notification "Flutter Build" "Multi-flavor build: $success_count/$total_count APKs built successfully" "false"
+ else
+  send_notification "Flutter Build" "Multi-flavor build failed!" "false"
+ fi
 }
 
 # --- Function: Upload multiple APKs to Google Drive ---
@@ -362,6 +406,15 @@ upload_multiple_apks_to_drive() {
   echo "$all_links" | xsel --clipboard --input
   echo ":clipboard: All links copied to clipboard!"
  fi
+ 
+ # Send notification
+ if [ "$upload_count" -eq "${#BUILT_APKS[@]}" ]; then
+  send_notification "Google Drive Upload" "All $upload_count APKs uploaded successfully!"
+ elif [ "$upload_count" -gt 0 ]; then
+  send_notification "Google Drive Upload" "Uploaded $upload_count/${#BUILT_APKS[@]} APKs" "false"
+ else
+  send_notification "Google Drive Upload" "Upload failed!" "false"
+ fi
 }
 
 # --- Function: Build multiple Android App Bundles ---
@@ -403,6 +456,15 @@ build_multiple_appbundles() {
  echo "Success: $success_count/$total_count"
  echo "Output directory: $OUTPUT_DIR"
  echo "═══════════════════════════════════════"
+ 
+ # Send notification
+ if [ "$success_count" -eq "$total_count" ]; then
+  send_notification "Flutter Build" "All $total_count Android App Bundle builds completed successfully!"
+ elif [ "$success_count" -gt 0 ]; then
+  send_notification "Flutter Build" "Multi-flavor build: $success_count/$total_count App Bundles built successfully" "false"
+ else
+  send_notification "Flutter Build" "Multi-flavor App Bundle build failed!" "false"
+ fi
 }
 
 # --- Function: Build multiple iOS IPAs ---
@@ -444,6 +506,15 @@ build_multiple_ios_ipas() {
  echo "Success: $success_count/$total_count"
  echo "Output directory: $OUTPUT_DIR"
  echo "═══════════════════════════════════════"
+ 
+ # Send notification
+ if [ "$success_count" -eq "$total_count" ]; then
+  send_notification "Flutter Build" "All $total_count iOS IPA builds completed successfully!"
+ elif [ "$success_count" -gt 0 ]; then
+  send_notification "Flutter Build" "Multi-flavor build: $success_count/$total_count IPAs built successfully" "false"
+ else
+  send_notification "Flutter Build" "Multi-flavor iOS IPA build failed!" "false"
+ fi
 }
 
 PROJECTS_FILE="$HOME/.apk_uploader_projects.json"
@@ -589,20 +660,45 @@ upload_apk_to_drive() {
  else
   echo ":warning:  Failed to delete local APK file."
  fi
+ 
+ # Send notification
+ local flavor_msg=""
+ if [ -n "$FLAVOR_NAME" ]; then
+  flavor_msg=" (Flavor: $FLAVOR_NAME)"
+ fi
+ send_notification "Google Drive Upload" "APK uploaded successfully!$flavor_msg"
 }
 
 # --- Function: Build Android App Bundle ---
 build_appbundle() {
  echo ":package: Building Android App Bundle..."
- $FLUTTER_CMD build appbundle $FLAVOR_FLAGS
- echo ":white_check_mark: App Bundle build completed!"
+ if $FLUTTER_CMD build appbundle $FLAVOR_FLAGS; then
+  echo ":white_check_mark: App Bundle build completed!"
+  local flavor_msg=""
+  if [ -n "$FLAVOR_NAME" ]; then
+   flavor_msg=" (Flavor: $FLAVOR_NAME)"
+  fi
+  send_notification "Flutter Build" "Android App Bundle build completed successfully!$flavor_msg"
+ else
+  send_notification "Flutter Build" "Android App Bundle build failed!" "false"
+  return 1
+ fi
 }
 
 # --- Function: Build iOS IPA ---
 build_ios() {
  echo ":package: Building iOS IPA..."
- $FLUTTER_CMD build ipa $FLAVOR_FLAGS
- echo ":white_check_mark: IPA build completed!"
+ if $FLUTTER_CMD build ipa $FLAVOR_FLAGS; then
+  echo ":white_check_mark: IPA build completed!"
+  local flavor_msg=""
+  if [ -n "$FLAVOR_NAME" ]; then
+   flavor_msg=" (Flavor: $FLAVOR_NAME)"
+  fi
+  send_notification "Flutter Build" "iOS IPA build completed successfully!$flavor_msg"
+ else
+  send_notification "Flutter Build" "iOS IPA build failed!" "false"
+  return 1
+ fi
 }
 
 # --- First Menu: Select FVM ---
