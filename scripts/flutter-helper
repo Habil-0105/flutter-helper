@@ -615,6 +615,7 @@ build_multiple_appbundles() {
  
  local success_count=0
  local total_count=${#SELECTED_FLAVORS[@]}
+ BUILT_APPBUNDLES=()
  
  for flavor in "${SELECTED_FLAVORS[@]}"; do
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -626,6 +627,7 @@ build_multiple_appbundles() {
    source_aab="build/app/outputs/bundle/${flavor}Release/app-${flavor}-release.aab"
    if [ -f "$source_aab" ]; then
     cp "$source_aab" "$OUTPUT_DIR/app-${flavor}-release.aab"
+    BUILT_APPBUNDLES+=("$OUTPUT_DIR/app-${flavor}-release.aab:$flavor")
     echo ":white_check_mark: App Bundle for $flavor saved to $OUTPUT_DIR"
     ((success_count++))
    else
@@ -650,6 +652,144 @@ build_multiple_appbundles() {
   send_notification "Flutter Build" "Multi-flavor build: $success_count/$total_count App Bundles built successfully" "false"
  else
   send_notification "Flutter Build" "Multi-flavor App Bundle build failed!" "false"
+ fi
+}
+
+# --- Function: Upload multiple App Bundles to Google Drive ---
+upload_multiple_appbundles_to_drive() {
+ echo ":lightning: Preparing to upload multiple App Bundles to Google Drive..."
+ 
+ # Validate environment variable
+ if [ -z "$GDRIVE_ACCOUNT_FILE" ]; then
+  echo ":x: GDRIVE_ACCOUNT_FILE environment variable is not set!"
+  echo "Please add 'export GDRIVE_ACCOUNT_FILE=your_file_path' to your ~/.zshrc"
+  return 1
+ fi
+ 
+ # Install gdrive if not installed
+ if ! command -v gdrive &> /dev/null; then
+  echo ":arrow_down_small: Installing gdrive..."
+  curl -L -o gdrive.tar.gz https://github.com/glotlabs/gdrive/releases/download/3.9.1/gdrive_linux-x64.tar.gz
+  tar -xzf gdrive.tar.gz
+  chmod +x gdrive
+  sudo mv gdrive /usr/local/bin/
+ fi
+ 
+ # Check if gdrive account already exists
+ if ! gdrive about &>/dev/null; then
+  echo ":key: Importing gdrive account..."
+  gdrive account import "$GDRIVE_ACCOUNT_FILE"
+ else
+  echo ":white_check_mark: gdrive account already imported."
+ fi
+ 
+ # Extract app version from pubspec.yaml
+ app_version=""
+ if [ -f "pubspec.yaml" ]; then
+  app_version=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d'+' -f1)
+  if [ -n "$app_version" ]; then
+   echo ":label: App version: $app_version"
+  fi
+ fi
+ 
+ date_str=$(date +%d-%m-%Y)
+ local upload_count=0
+ UPLOAD_LINKS=()
+ 
+ for aab_info in "${BUILT_APPBUNDLES[@]}"; do
+  aab_path="${aab_info%%:*}"
+  flavor_name="${aab_info##*:}"
+  
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ":arrow_up_small: Uploading flavor: $flavor_name"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  # Build filename
+  filename_parts="${APP_NAME}"
+  if [ -n "$CUSTOM_NAME" ]; then
+   filename_parts="${filename_parts} ${CUSTOM_NAME}"
+  fi
+  filename_parts="${filename_parts} ${flavor_name}"
+  
+  if [ -n "$app_version" ]; then
+   renamed_aab="${aab_path%/*}/${filename_parts} v${app_version} (${date_str}).aab"
+  else
+   renamed_aab="${aab_path%/*}/${filename_parts} (${date_str}).aab"
+  fi
+  
+  if [ ! -f "$aab_path" ]; then
+   echo ":x: App Bundle not found at $aab_path"
+   continue
+  fi
+  
+  cp "$aab_path" "$renamed_aab"
+  
+  echo "Uploading: $(basename "$renamed_aab")"
+  upload_output=$(gdrive files upload --parent "$GDRIVE_FOLDER_ID" "$renamed_aab" 2>&1)
+  upload_exit_code=$?
+  
+  # Check if upload failed
+  if [ $upload_exit_code -ne 0 ]; then
+   echo ":x: Upload failed for $flavor_name (exit code: $upload_exit_code)"
+   rm "$renamed_aab"
+   continue
+  fi
+  
+  # Extract file ID from the upload output
+  file_id=$(echo "$upload_output" | grep 'Id:' | awk '{print $2}')
+  
+  if [ -z "$file_id" ]; then
+   echo ":x: Failed to retrieve file ID for $flavor_name"
+   rm "$renamed_aab"
+   continue
+  fi
+  
+  gdrive permissions share "$file_id" > /dev/null 2>&1
+  file_url="https://drive.google.com/file/d/$file_id/view"
+  
+  echo ":white_check_mark: Uploaded: $flavor_name"
+  echo ":link: Link: $file_url"
+  
+  UPLOAD_LINKS+=("$flavor_name: $file_url")
+  
+  # Delete renamed App Bundle
+  rm "$renamed_aab"
+  ((upload_count++))
+ done
+ 
+ echo ""
+ echo "═══════════════════════════════════════"
+ echo ":tada: Upload completed!"
+ echo "Uploaded: $upload_count/${#BUILT_APPBUNDLES[@]}"
+ echo "═══════════════════════════════════════"
+ echo ""
+ echo ":link: Download Links:"
+ for link in "${UPLOAD_LINKS[@]}"; do
+  echo "  • $link"
+ done
+ echo ""
+ 
+ # Copy all links to clipboard
+ all_links=$(printf "%s\n" "${UPLOAD_LINKS[@]}")
+ if command -v pbcopy &>/dev/null; then
+  echo "$all_links" | pbcopy
+  echo ":clipboard: All links copied to clipboard!"
+ elif command -v xclip &>/dev/null; then
+  echo "$all_links" | xclip -selection clipboard
+  echo ":clipboard: All links copied to clipboard!"
+ elif command -v xsel &>/dev/null; then
+  echo "$all_links" | xsel --clipboard --input
+  echo ":clipboard: All links copied to clipboard!"
+ fi
+ 
+ # Send notification
+ if [ "$upload_count" -eq "${#BUILT_APPBUNDLES[@]}" ]; then
+  send_notification "Google Drive Upload" "All $upload_count App Bundles uploaded successfully!"
+ elif [ "$upload_count" -gt 0 ]; then
+  send_notification "Google Drive Upload" "Uploaded $upload_count/${#BUILT_APPBUNDLES[@]} App Bundles" "false"
+ else
+  send_notification "Google Drive Upload" "Upload failed!" "false"
  fi
 }
 
@@ -1185,14 +1325,17 @@ show_menu() {
  echo "8.  Build multiple Android APKs (multi-flavor)"
  echo "9.  Build multiple Android APKs and Upload (multi-flavor)"
  echo "10. Build multiple Android App Bundles (multi-flavor)"
- echo "11. Build multiple iOS IPAs (multi-flavor)"
- echo "12. Clean ALL (Flutter, Android, iOS)"
- echo "13. Build ALL (Android + iOS)"
- echo "14. Build iOS IPA and Upload to Google Drive"
- echo "15. Build multiple iOS IPAs and Upload (multi-flavor)"
- echo "16. Quit"
+ echo "11. Build multiple Android App Bundles and Upload (multi-flavor)"
+ echo "12. Build multiple iOS IPAs (multi-flavor)"
+ echo "13. Clean ALL (Flutter, Android, iOS)"
+ echo "14. Build ALL (Android + iOS)"
+ echo "15. Build iOS IPA and Upload to Google Drive"
+ echo "16. Build multiple iOS IPAs and Upload (multi-flavor)"
+ echo "17. Build APK + IPA and Upload to Google Drive"
+ echo "18. Build ALL (Android + iOS) - Multiple Flavors"
+ echo "19. Quit"
  echo "═══════════════════════════════════════"
- read -p "Enter your choice [1-16]: " choice
+ read -p "Enter your choice [1-19]: " choice
 }
 
 # --- Main Logic ---
@@ -1209,6 +1352,12 @@ while true; do
   clean_ios
   ;;
  4)
+  read -p "Enter custom name (optional, press Enter to skip): " CUSTOM_NAME
+  if [ -z "$CUSTOM_NAME" ]; then
+   CUSTOM_NAME=""
+  else
+   echo ":label: Custom name: $CUSTOM_NAME"
+  fi
   prompt_flavor
   clean_flutter
   build_android
@@ -1228,23 +1377,47 @@ while true; do
   clean_flutter
   ;;
  6)
+  read -p "Enter custom name (optional, press Enter to skip): " CUSTOM_NAME
+  if [ -z "$CUSTOM_NAME" ]; then
+   CUSTOM_NAME=""
+  else
+   echo ":label: Custom name: $CUSTOM_NAME"
+  fi
   prompt_flavor
   clean_flutter
   build_appbundle
   ;;
  7)
+  read -p "Enter custom name (optional, press Enter to skip): " CUSTOM_NAME
+  if [ -z "$CUSTOM_NAME" ]; then
+   CUSTOM_NAME=""
+  else
+   echo ":label: Custom name: $CUSTOM_NAME"
+  fi
   prompt_flavor
   clean_flutter
   clean_ios
   build_ios
   ;;
  8)
+  read -p "Enter custom name (optional, press Enter to skip): " CUSTOM_NAME
+  if [ -z "$CUSTOM_NAME" ]; then
+   CUSTOM_NAME=""
+  else
+   echo ":label: Custom name: $CUSTOM_NAME"
+  fi
   prompt_multiple_flavors || continue
   clean_flutter
   build_multiple_android_apks
   ;;
  9)
   choose_project || continue
+  read -p "Enter custom name (optional, press Enter to skip): " CUSTOM_NAME
+  if [ -z "$CUSTOM_NAME" ]; then
+   CUSTOM_NAME=""
+  else
+   echo ":label: Custom name: $CUSTOM_NAME"
+  fi
   prompt_multiple_flavors || continue
   clean_flutter
   build_multiple_android_apks
@@ -1252,31 +1425,90 @@ while true; do
   clean_flutter
   ;;
  10)
+  read -p "Enter custom name (optional, press Enter to skip): " CUSTOM_NAME
+  if [ -z "$CUSTOM_NAME" ]; then
+   CUSTOM_NAME=""
+  else
+   echo ":label: Custom name: $CUSTOM_NAME"
+  fi
   prompt_multiple_flavors || continue
   clean_flutter
   build_multiple_appbundles
   ;;
  11)
+  choose_project || continue
+  read -p "Enter custom name (optional, press Enter to skip): " CUSTOM_NAME
+  if [ -z "$CUSTOM_NAME" ]; then
+   CUSTOM_NAME=""
+  else
+   echo ":label: Custom name: $CUSTOM_NAME"
+  fi
+  prompt_multiple_flavors || continue
+  clean_flutter
+  build_multiple_appbundles
+  upload_multiple_appbundles_to_drive
+  clean_flutter
+  ;;
+ 12)
+  read -p "Enter custom name (optional, press Enter to skip): " CUSTOM_NAME
+  if [ -z "$CUSTOM_NAME" ]; then
+   CUSTOM_NAME=""
+  else
+   echo ":label: Custom name: $CUSTOM_NAME"
+  fi
   prompt_multiple_flavors || continue
   clean_flutter
   clean_ios
   build_multiple_ios_ipas
   ;;
- 12)
+ 13)
   clean_flutter
   clean_android
   clean_ios
   ;;
  13)
-  prompt_flavor
   clean_flutter
   clean_android
   clean_ios
-  build_android
-  build_appbundle
-  build_ios
   ;;
  14)
+  prompt_flavor
+  echo ""
+  echo "═══════════════════════════════════════"
+  echo "      SELECT BUILD COMBINATION"
+  echo "═══════════════════════════════════════"
+  echo "1. APK + IPA"
+  echo "2. App Bundle + IPA"
+  echo "3. APK + App Bundle + IPA (All)"
+  echo "═══════════════════════════════════════"
+  read -p "Enter your choice [1-3]: " build_choice
+  clean_flutter
+  clean_android
+  clean_ios
+  case $build_choice in
+  1)
+   # APK + IPA only
+   build_android
+   build_ios
+   ;;
+  2)
+   # App Bundle + IPA only
+   build_appbundle
+   build_ios
+   ;;
+  3)
+   # APK + App Bundle + IPA (All)
+   build_android
+   build_appbundle
+   build_ios
+   ;;
+  *)
+   echo ":x: Invalid choice! Please choose 1, 2, or 3."
+   continue
+   ;;
+  esac
+  ;;
+ 15)
   choose_project || continue
   read -p "Enter custom name (optional, press Enter to skip): " CUSTOM_NAME
   if [ -z "$CUSTOM_NAME" ]; then
@@ -1291,8 +1523,14 @@ while true; do
   upload_ios_ipa_to_drive
   clean_flutter
   ;;
- 15)
+ 16)
   choose_project || continue
+  read -p "Enter custom name (optional, press Enter to skip): " CUSTOM_NAME
+  if [ -z "$CUSTOM_NAME" ]; then
+   CUSTOM_NAME=""
+  else
+   echo ":label: Custom name: $CUSTOM_NAME"
+  fi
   prompt_multiple_flavors || continue
   clean_flutter
   clean_ios
@@ -1300,7 +1538,97 @@ while true; do
   upload_multiple_ios_ipas_to_drive
   clean_flutter
   ;;
- 16)
+ 17)
+  choose_project || continue
+  read -p "Enter custom name (optional, press Enter to skip): " CUSTOM_NAME
+  if [ -z "$CUSTOM_NAME" ]; then
+   CUSTOM_NAME=""
+  else
+   echo ":label: Custom name: $CUSTOM_NAME"
+  fi
+  echo ""
+  echo "═══════════════════════════════════════"
+  echo "      SELECT BUILD MODE"
+  echo "═══════════════════════════════════════"
+  echo "1. Single flavor (or no flavor)"
+  echo "2. Multiple flavors"
+  echo "═══════════════════════════════════════"
+  read -p "Enter your choice [1-2]: " mode_choice
+  case $mode_choice in
+  1)
+   # Single flavor workflow
+   prompt_flavor
+   clean_flutter
+   clean_android
+   clean_ios
+   build_android
+   build_ios
+   upload_apk_to_drive
+   upload_ios_ipa_to_drive
+   clean_flutter
+   ;;
+  2)
+   # Multiple flavors workflow
+   prompt_multiple_flavors || continue
+   clean_flutter
+   clean_android
+   clean_ios
+   build_multiple_android_apks
+   build_multiple_ios_ipas
+   upload_multiple_apks_to_drive
+   upload_multiple_ios_ipas_to_drive
+   clean_flutter
+   ;;
+  *)
+   echo ":x: Invalid mode choice! Please choose 1 or 2."
+   continue
+   ;;
+  esac
+  ;;
+ 18)
+  read -p "Enter custom name (optional, press Enter to skip): " CUSTOM_NAME
+  if [ -z "$CUSTOM_NAME" ]; then
+   CUSTOM_NAME=""
+  else
+   echo ":label: Custom name: $CUSTOM_NAME"
+  fi
+  prompt_multiple_flavors || continue
+  echo ""
+  echo "═══════════════════════════════════════"
+  echo "      SELECT BUILD COMBINATION"
+  echo "═══════════════════════════════════════"
+  echo "1. APK + IPA"
+  echo "2. App Bundle + IPA"
+  echo "3. APK + App Bundle + IPA (All)"
+  echo "═══════════════════════════════════════"
+  read -p "Enter your choice [1-3]: " build_choice
+  clean_flutter
+  clean_android
+  clean_ios
+  case $build_choice in
+  1)
+   # APK + IPA only
+   build_multiple_android_apks
+   build_multiple_ios_ipas
+   ;;
+  2)
+   # App Bundle + IPA only
+   build_multiple_appbundles
+   build_multiple_ios_ipas
+   ;;
+  3)
+   # APK + App Bundle + IPA (All)
+   build_multiple_android_apks
+   build_multiple_appbundles
+   build_multiple_ios_ipas
+   ;;
+  *)
+   echo ":x: Invalid choice! Please choose 1, 2, or 3."
+   continue
+   ;;
+  esac
+  ;;
+ 19)
   echo ":wave: Exiting..."
   break
   ;;
