@@ -665,6 +665,7 @@ build_multiple_ios_ipas() {
  
  local success_count=0
  local total_count=${#SELECTED_FLAVORS[@]}
+ BUILT_IPAS=()
  
  for flavor in "${SELECTED_FLAVORS[@]}"; do
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -676,6 +677,7 @@ build_multiple_ios_ipas() {
    source_ipa=$(find build/ios/ipa -name "*.ipa" -type f | head -n 1)
    if [ -n "$source_ipa" ]; then
     cp "$source_ipa" "$OUTPUT_DIR/app-${flavor}.ipa"
+    BUILT_IPAS+=("$OUTPUT_DIR/app-${flavor}.ipa:$flavor")
     echo ":white_check_mark: IPA for $flavor saved to $OUTPUT_DIR"
     ((success_count++))
    else
@@ -904,6 +906,263 @@ build_ios() {
  fi
 }
 
+# --- Function: Upload iOS IPA to Google Drive ---
+upload_ios_ipa_to_drive() {
+ echo ":lightning:  Preparing to upload iOS IPA to Google Drive..."
+ # Validate environment variable
+ if [ -z "$GDRIVE_ACCOUNT_FILE" ]; then
+  echo ":x: GDRIVE_ACCOUNT_FILE environment variable is not set!"
+  echo "Please add 'export GDRIVE_ACCOUNT_FILE=your_file_path' to your ~/.zshrc"
+  return 1
+ fi
+ # Install gdrive if not installed
+ if ! command -v gdrive &> /dev/null; then
+  echo ":arrow_down_small:  Installing gdrive..."
+  curl -L -o gdrive.tar.gz https://github.com/glotlabs/gdrive/releases/download/3.9.1/gdrive_linux-x64.tar.gz
+  tar -xzf gdrive.tar.gz
+  chmod +x gdrive
+  sudo mv gdrive /usr/local/bin/
+ fi
+ # Check if gdrive account already exists
+ if ! gdrive about &>/dev/null; then
+  echo ":key: Importing gdrive account..."
+  gdrive account import "$GDRIVE_ACCOUNT_FILE"
+ else
+  echo ":white_check_mark: gdrive account already imported."
+ fi
+ 
+ # Extract app version from pubspec.yaml
+ app_version=""
+ if [ -f "pubspec.yaml" ]; then
+  app_version=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d'+' -f1)
+  if [ -n "$app_version" ]; then
+   echo ":label: App version: $app_version"
+  fi
+ fi
+ 
+ # Find IPA file (iOS uses a different structure)
+ ipa_path=$(find build/ios/ipa -name "*.ipa" -type f | head -n 1)
+ if [ -z "$ipa_path" ]; then
+  echo ":x: IPA not found in build/ios/ipa/"
+  return 1
+ fi
+ 
+ date_str=$(date +%d-%m-%Y)
+ # Build filename with custom name, flavor, and version
+ filename_parts="${APP_NAME}"
+ if [ -n "$CUSTOM_NAME" ]; then
+  filename_parts="${filename_parts} ${CUSTOM_NAME}"
+ fi
+ if [ -n "$FLAVOR_NAME" ]; then
+  filename_parts="${filename_parts} ${FLAVOR_NAME}"
+ fi
+ if [ -n "$app_version" ]; then
+  renamed_ipa="build/ios/ipa/${filename_parts} v${app_version} (${date_str}).ipa"
+ else
+  renamed_ipa="build/ios/ipa/${filename_parts} (${date_str}).ipa"
+ fi
+ 
+ cp "$ipa_path" "$renamed_ipa"
+ echo ":arrow_up_small: Uploading $renamed_ipa..."
+ upload_output=$(gdrive files upload --parent "$GDRIVE_FOLDER_ID" "$renamed_ipa" 2>&1)
+ upload_exit_code=$?
+ echo "$upload_output"
+ 
+ # Check if upload failed
+ if [ $upload_exit_code -ne 0 ]; then
+  echo ":x: Upload failed with exit code $upload_exit_code"
+  send_notification "Google Drive Upload" "iOS IPA upload failed!" "false"
+  rm "$renamed_ipa"
+  return 1
+ fi
+ 
+ # Extract file ID from the upload output
+ file_id=$(echo "$upload_output" | grep 'Id:' | awk '{print $2}')
+ if [ -z "$file_id" ]; then
+  echo ":x: Failed to retrieve file ID from upload output."
+  send_notification "Google Drive Upload" "iOS IPA upload failed - could not get file ID!" "false"
+  rm "$renamed_ipa"
+  return 1
+ fi
+ 
+ share_output=$(gdrive permissions share "$file_id" 2>&1)
+ share_exit_code=$?
+ echo "$share_output"
+ 
+ if [ $share_exit_code -ne 0 ]; then
+  echo ":warning: Failed to share file, but upload may have succeeded."
+ fi
+ 
+ file_url="https://drive.google.com/file/d/$file_id/view"
+ echo ":link: Download Link: $file_url"
+
+ if command -v pbcopy &>/dev/null; then
+  echo "$file_url" | pbcopy
+  echo ":clipboard:  Link copied to clipboard!"
+ elif command -v xclip &>/dev/null; then
+  echo "$file_url" | xclip -selection clipboard
+  echo ":clipboard:  Link copied to clipboard!"
+ elif command -v xsel &>/dev/null; then
+  echo "$file_url" | xsel --clipboard --input
+  echo ":clipboard:  Link copied to clipboard!"
+ else
+  echo ":warning: Clipboard tool not found. Install pbcopy/xclip/xsel to auto-copy."
+ fi
+
+ # Delete local IPA file after successful upload
+ echo ":wastebasket:  Deleting local IPA file..."
+ if rm "$renamed_ipa"; then
+  echo ":white_check_mark: Local IPA file deleted successfully!"
+ else
+  echo ":warning:  Failed to delete local IPA file."
+ fi
+ 
+ # Send notification
+ local flavor_msg=""
+ if [ -n "$FLAVOR_NAME" ]; then
+  flavor_msg=" (Flavor: $FLAVOR_NAME)"
+ fi
+ send_notification "Google Drive Upload" "iOS IPA uploaded successfully!$flavor_msg"
+}
+
+# --- Function: Upload multiple iOS IPAs to Google Drive ---
+upload_multiple_ios_ipas_to_drive() {
+ echo ":lightning: Preparing to upload multiple iOS IPAs to Google Drive..."
+ 
+ # Validate environment variable
+ if [ -z "$GDRIVE_ACCOUNT_FILE" ]; then
+  echo ":x: GDRIVE_ACCOUNT_FILE environment variable is not set!"
+  echo "Please add 'export GDRIVE_ACCOUNT_FILE=your_file_path' to your ~/.zshrc"
+  return 1
+ fi
+ 
+ # Install gdrive if not installed
+ if ! command -v gdrive &> /dev/null; then
+  echo ":arrow_down_small: Installing gdrive..."
+  curl -L -o gdrive.tar.gz https://github.com/glotlabs/gdrive/releases/download/3.9.1/gdrive_linux-x64.tar.gz
+  tar -xzf gdrive.tar.gz
+  chmod +x gdrive
+  sudo mv gdrive /usr/local/bin/
+ fi
+ 
+ # Check if gdrive account already exists
+ if ! gdrive about &>/dev/null; then
+  echo ":key: Importing gdrive account..."
+  gdrive account import "$GDRIVE_ACCOUNT_FILE"
+ else
+  echo ":white_check_mark: gdrive account already imported."
+ fi
+ 
+ # Extract app version from pubspec.yaml
+ app_version=""
+ if [ -f "pubspec.yaml" ]; then
+  app_version=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d'+' -f1)
+  if [ -n "$app_version" ]; then
+   echo ":label: App version: $app_version"
+  fi
+ fi
+ 
+ date_str=$(date +%d-%m-%Y)
+ local upload_count=0
+ UPLOAD_LINKS=()
+ 
+ for ipa_info in "${BUILT_IPAS[@]}"; do
+  ipa_path="${ipa_info%%:*}"
+  flavor_name="${ipa_info##*:}"
+  
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ":arrow_up_small: Uploading flavor: $flavor_name"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  # Build filename
+  filename_parts="${APP_NAME}"
+  if [ -n "$CUSTOM_NAME" ]; then
+   filename_parts="${filename_parts} ${CUSTOM_NAME}"
+  fi
+  filename_parts="${filename_parts} ${flavor_name}"
+  
+  if [ -n "$app_version" ]; then
+   renamed_ipa="${ipa_path%/*}/${filename_parts} v${app_version} (${date_str}).ipa"
+  else
+   renamed_ipa="${ipa_path%/*}/${filename_parts} (${date_str}).ipa"
+  fi
+  
+  if [ ! -f "$ipa_path" ]; then
+   echo ":x: IPA not found at $ipa_path"
+   continue
+  fi
+  
+  cp "$ipa_path" "$renamed_ipa"
+  
+  echo "Uploading: $(basename "$renamed_ipa")"
+  upload_output=$(gdrive files upload --parent "$GDRIVE_FOLDER_ID" "$renamed_ipa" 2>&1)
+  upload_exit_code=$?
+  
+  # Check if upload failed
+  if [ $upload_exit_code -ne 0 ]; then
+   echo ":x: Upload failed for $flavor_name (exit code: $upload_exit_code)"
+   rm "$renamed_ipa"
+   continue
+  fi
+  
+  # Extract file ID from the upload output
+  file_id=$(echo "$upload_output" | grep 'Id:' | awk '{print $2}')
+  
+  if [ -z "$file_id" ]; then
+   echo ":x: Failed to retrieve file ID for $flavor_name"
+   rm "$renamed_ipa"
+   continue
+  fi
+  
+  gdrive permissions share "$file_id" > /dev/null 2>&1
+  file_url="https://drive.google.com/file/d/$file_id/view"
+  
+  echo ":white_check_mark: Uploaded: $flavor_name"
+  echo ":link: Link: $file_url"
+  
+  UPLOAD_LINKS+=("$flavor_name: $file_url")
+  
+  # Delete renamed IPA
+  rm "$renamed_ipa"
+  ((upload_count++))
+ done
+ 
+ echo ""
+ echo "═══════════════════════════════════════"
+ echo ":tada: Upload completed!"
+ echo "Uploaded: $upload_count/${#BUILT_IPAS[@]}"
+ echo "═══════════════════════════════════════"
+ echo ""
+ echo ":link: Download Links:"
+ for link in "${UPLOAD_LINKS[@]}"; do
+  echo "  • $link"
+ done
+ echo ""
+ 
+ # Copy all links to clipboard
+ all_links=$(printf "%s\n" "${UPLOAD_LINKS[@]}")
+ if command -v pbcopy &>/dev/null; then
+  echo "$all_links" | pbcopy
+  echo ":clipboard: All links copied to clipboard!"
+ elif command -v xclip &>/dev/null; then
+  echo "$all_links" | xclip -selection clipboard
+  echo ":clipboard: All links copied to clipboard!"
+ elif command -v xsel &>/dev/null; then
+  echo "$all_links" | xsel --clipboard --input
+  echo ":clipboard: All links copied to clipboard!"
+ fi
+ 
+ # Send notification
+ if [ "$upload_count" -eq "${#BUILT_IPAS[@]}" ]; then
+  send_notification "Google Drive Upload" "All $upload_count iOS IPAs uploaded successfully!"
+ elif [ "$upload_count" -gt 0 ]; then
+  send_notification "Google Drive Upload" "Uploaded $upload_count/${#BUILT_IPAS[@]} iOS IPAs" "false"
+ else
+  send_notification "Google Drive Upload" "Upload failed!" "false"
+ fi
+}
+
 # --- Validate we're in a Flutter project ---
 validate_flutter_project
 
@@ -929,9 +1188,11 @@ show_menu() {
  echo "11. Build multiple iOS IPAs (multi-flavor)"
  echo "12. Clean ALL (Flutter, Android, iOS)"
  echo "13. Build ALL (Android + iOS)"
- echo "14. Quit"
+ echo "14. Build iOS IPA and Upload to Google Drive"
+ echo "15. Build multiple iOS IPAs and Upload (multi-flavor)"
+ echo "16. Quit"
  echo "═══════════════════════════════════════"
- read -p "Enter your choice [1-14]: " choice
+ read -p "Enter your choice [1-16]: " choice
 }
 
 # --- Main Logic ---
@@ -1016,6 +1277,30 @@ while true; do
   build_ios
   ;;
  14)
+  choose_project || continue
+  read -p "Enter custom name (optional, press Enter to skip): " CUSTOM_NAME
+  if [ -z "$CUSTOM_NAME" ]; then
+   CUSTOM_NAME=""
+  else
+   echo ":label: Custom name: $CUSTOM_NAME"
+  fi
+  prompt_flavor
+  clean_flutter
+  clean_ios
+  build_ios
+  upload_ios_ipa_to_drive
+  clean_flutter
+  ;;
+ 15)
+  choose_project || continue
+  prompt_multiple_flavors || continue
+  clean_flutter
+  clean_ios
+  build_multiple_ios_ipas
+  upload_multiple_ios_ipas_to_drive
+  clean_flutter
+  ;;
+ 16)
   echo ":wave: Exiting..."
   break
   ;;
