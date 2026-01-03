@@ -547,6 +547,24 @@ copy_to_clipboard() {
  fi
 }
 
+# --- Function: Display upload success message ---
+display_upload_success() {
+ local platform_name="$1"      # Android APK, iOS IPA, App Bundle
+ local flavor_name="$2"         # optional
+ local custom_name="$3"         # optional
+ local file_url="$4"
+ 
+ local label_parts="Uploaded for $platform_name"
+ [ -n "$flavor_name" ] && label_parts="${label_parts} $flavor_name"
+ [ -n "$custom_name" ] && label_parts="${label_parts} $custom_name"
+ label_parts="${label_parts} success"
+ 
+ echo ""
+ echo ":white_check_mark: $label_parts"
+ echo "$file_url"
+ echo ""
+}
+
 # --- Function: Upload single file to Google Drive and return URL ---
 upload_single_file_to_drive() {
  local source_path="$1"
@@ -585,9 +603,6 @@ upload_single_file_to_drive() {
  # Share file
   gdrive permissions share "$file_id" > /dev/null 2>&1
  local file_url="https://drive.google.com/file/d/$file_id/view"
-  
- echo ":white_check_mark: Uploaded${flavor_name:+: $flavor_name}"
-  echo ":link: Link: $file_url"
   
  # Cleanup temp file
  rm -f "$temp_file"
@@ -630,10 +645,14 @@ upload_multiple_apks_to_drive() {
   # Build filename
   local filename=$(build_upload_filename "apk" "$flavor_name" "$app_version" "$CUSTOM_NAME")
   
+  echo "Uploading: $(basename "$filename")"
+  
   # Upload file
   local file_url=$(upload_single_file_to_drive "$apk_path" "$filename" "$GDRIVE_FOLDER_ID" "$flavor_name")
   
   if [ $? -eq 0 ] && [ -n "$file_url" ]; then
+   # Display success message
+   display_upload_success "Android APK" "$flavor_name" "$CUSTOM_NAME" "$file_url"
    UPLOAD_LINKS+=("$flavor_name: $file_url")
   ((upload_count++))
   fi
@@ -746,10 +765,14 @@ upload_multiple_appbundles_to_drive() {
   # Build filename
   local filename=$(build_upload_filename "aab" "$flavor_name" "$app_version" "$CUSTOM_NAME")
   
+  echo "Uploading: $(basename "$filename")"
+  
   # Upload file
   local file_url=$(upload_single_file_to_drive "$aab_path" "$filename" "$GDRIVE_FOLDER_ID" "$flavor_name")
   
   if [ $? -eq 0 ] && [ -n "$file_url" ]; then
+   # Display success message
+   display_upload_success "App Bundle" "$flavor_name" "$CUSTOM_NAME" "$file_url"
    UPLOAD_LINKS+=("$flavor_name: $file_url")
    ((upload_count++))
   fi
@@ -962,6 +985,8 @@ upload_apk_to_drive() {
  # Build filename
  local filename=$(build_upload_filename "apk" "$FLAVOR_NAME" "$app_version" "$CUSTOM_NAME")
  
+ echo "Uploading: $(basename "$filename")"
+ 
  # Upload file
  local file_url=$(upload_single_file_to_drive "$apk_path" "$filename" "$GDRIVE_FOLDER_ID" "$FLAVOR_NAME")
  
@@ -969,6 +994,9 @@ upload_apk_to_drive() {
   send_notification "Google Drive Upload" "APK upload failed!" "false"
   return 1
  fi
+ 
+ # Display success message
+ display_upload_success "Android APK" "$FLAVOR_NAME" "$CUSTOM_NAME" "$file_url"
  
  # Copy link to clipboard
  copy_to_clipboard "$file_url"
@@ -1043,6 +1071,8 @@ upload_ios_ipa_to_drive() {
  # Build filename
  local filename=$(build_upload_filename "ipa" "$FLAVOR_NAME" "$app_version" "$CUSTOM_NAME")
  
+ echo "Uploading: $(basename "$filename")"
+ 
  # Upload file
  local file_url=$(upload_single_file_to_drive "$ipa_path" "$filename" "$GDRIVE_FOLDER_ID" "$FLAVOR_NAME")
  
@@ -1050,6 +1080,9 @@ upload_ios_ipa_to_drive() {
   send_notification "Google Drive Upload" "iOS IPA upload failed!" "false"
   return 1
  fi
+ 
+ # Display success message
+ display_upload_success "iOS IPA" "$FLAVOR_NAME" "$CUSTOM_NAME" "$file_url"
  
  # Copy link to clipboard
  copy_to_clipboard "$file_url"
@@ -1097,12 +1130,16 @@ upload_multiple_ios_ipas_to_drive() {
   # Build filename
   local filename=$(build_upload_filename "ipa" "$flavor_name" "$app_version" "$CUSTOM_NAME")
   
+  echo "Uploading: $(basename "$filename")"
+  
   # Upload file
   local file_url=$(upload_single_file_to_drive "$ipa_path" "$filename" "$GDRIVE_FOLDER_ID" "$flavor_name")
   
   if [ $? -eq 0 ] && [ -n "$file_url" ]; then
-  UPLOAD_LINKS+=("$flavor_name: $file_url")
-  ((upload_count++))
+   # Display success message
+   display_upload_success "iOS IPA" "$flavor_name" "$CUSTOM_NAME" "$file_url"
+   UPLOAD_LINKS+=("$flavor_name: $file_url")
+   ((upload_count++))
   fi
  done
  
@@ -1374,14 +1411,14 @@ while true; do
   echo "═══════════════════════════════════════"
   echo ":android: Select folder for Android APK:"
   choose_project || continue
-  local GDRIVE_FOLDER_ID_APK="$GDRIVE_FOLDER_ID"
-  local APP_NAME_APK="$APP_NAME"
+  GDRIVE_FOLDER_ID_APK="$GDRIVE_FOLDER_ID"
+  APP_NAME_APK="$APP_NAME"
   echo ""
   echo ":apple: Select folder for iOS IPA:"
   choose_project_ipa || continue
   # Save IPA folder variables (set inside choose_project_ipa)
-  local GDRIVE_FOLDER_ID_IPA_SAVED="$GDRIVE_FOLDER_ID_IPA"
-  local APP_NAME_IPA_SAVED="$APP_NAME_IPA"
+  GDRIVE_FOLDER_ID_IPA_SAVED="$GDRIVE_FOLDER_ID_IPA"
+  APP_NAME_IPA_SAVED="$APP_NAME_IPA"
   echo ""
   read -p "Enter custom name (optional, press Enter to skip): " CUSTOM_NAME
   if [ -z "$CUSTOM_NAME" ]; then
