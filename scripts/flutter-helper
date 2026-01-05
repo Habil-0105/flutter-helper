@@ -532,14 +532,24 @@ build_upload_filename() {
 copy_to_clipboard() {
  local text="$1"
  
+ # Extract URLs from the text (matches http:// and https:// URLs)
+ local urls=$(echo "$text" | grep -oE 'https?://[^[:space:]]+' | sort -u)
+ 
+ # If URLs were found, use them; otherwise use original text
+ if [ -n "$urls" ]; then
+  local text_to_copy="$urls"
+ else
+  local text_to_copy="$text"
+ fi
+ 
  if command -v pbcopy &>/dev/null; then
-  echo "$text" | pbcopy
+  echo "$text_to_copy" | pbcopy
   echo ":clipboard: Link copied to clipboard!"
  elif command -v xclip &>/dev/null; then
-  echo "$text" | xclip -selection clipboard
+  echo "$text_to_copy" | xclip -selection clipboard
   echo ":clipboard: Link copied to clipboard!"
  elif command -v xsel &>/dev/null; then
-  echo "$text" | xsel --clipboard --input
+  echo "$text_to_copy" | xsel --clipboard --input
   echo ":clipboard: Link copied to clipboard!"
  else
   echo ":warning: Clipboard tool not found. Install pbcopy/xclip/xsel to auto-copy."
