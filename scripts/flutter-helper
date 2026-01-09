@@ -419,10 +419,6 @@ build_multiple_android_apks() {
  echo ":rocket: Building multiple Android APKs..."
  echo ""
  
- # Create output directory for organized builds
- OUTPUT_DIR="build/app/outputs/flutter-apk/multi-flavor"
- mkdir -p "$OUTPUT_DIR"
- 
  local success_count=0
  local total_count=${#SELECTED_FLAVORS[@]}
  BUILT_APKS=()
@@ -433,12 +429,11 @@ build_multiple_android_apks() {
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   
   if $FLUTTER_CMD build apk --flavor "$flavor" --dart-define=FLAVOR="$flavor"; then
-   # Move and rename the APK
+   # Use default Flutter build output path
    source_apk="build/app/outputs/flutter-apk/app-${flavor}-release.apk"
    if [ -f "$source_apk" ]; then
-    cp "$source_apk" "$OUTPUT_DIR/app-${flavor}-release.apk"
-    BUILT_APKS+=("$OUTPUT_DIR/app-${flavor}-release.apk:$flavor")
-    echo ":white_check_mark: APK for $flavor saved to $OUTPUT_DIR"
+    BUILT_APKS+=("$source_apk:$flavor")
+    echo ":white_check_mark: APK for $flavor built successfully"
     ((success_count++))
    else
     echo ":warning: APK not found for $flavor at $source_apk"
@@ -452,7 +447,6 @@ build_multiple_android_apks() {
  echo "═══════════════════════════════════════"
  echo ":tada: Multi-flavor build completed!"
  echo "Success: $success_count/$total_count"
- echo "Output directory: $OUTPUT_DIR"
  echo "═══════════════════════════════════════"
  
  # Send notification
@@ -700,10 +694,6 @@ build_multiple_appbundles() {
  echo ":rocket: Building multiple Android App Bundles..."
  echo ""
  
- # Create output directory for organized builds
- OUTPUT_DIR="build/app/outputs/bundle/multi-flavor"
- mkdir -p "$OUTPUT_DIR"
- 
  local success_count=0
  local total_count=${#SELECTED_FLAVORS[@]}
  BUILT_APPBUNDLES=()
@@ -714,12 +704,11 @@ build_multiple_appbundles() {
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   
   if $FLUTTER_CMD build appbundle --flavor "$flavor" --dart-define=FLAVOR="$flavor"; then
-   # Move and rename the App Bundle
+   # Use default Flutter build output path
    source_aab="build/app/outputs/bundle/${flavor}Release/app-${flavor}-release.aab"
    if [ -f "$source_aab" ]; then
-    cp "$source_aab" "$OUTPUT_DIR/app-${flavor}-release.aab"
-    BUILT_APPBUNDLES+=("$OUTPUT_DIR/app-${flavor}-release.aab:$flavor")
-    echo ":white_check_mark: App Bundle for $flavor saved to $OUTPUT_DIR"
+    BUILT_APPBUNDLES+=("$source_aab:$flavor")
+    echo ":white_check_mark: App Bundle for $flavor built successfully"
     ((success_count++))
    else
     echo ":warning: App Bundle not found for $flavor at $source_aab"
@@ -733,7 +722,6 @@ build_multiple_appbundles() {
  echo "═══════════════════════════════════════"
  echo ":tada: Multi-flavor App Bundle build completed!"
  echo "Success: $success_count/$total_count"
- echo "Output directory: $OUTPUT_DIR"
  echo "═══════════════════════════════════════"
  
  # Send notification
@@ -820,10 +808,6 @@ build_multiple_ios_ipas() {
  echo ":rocket: Building multiple iOS IPAs..."
  echo ""
  
- # Create output directory for organized builds
- OUTPUT_DIR="build/ios/ipa/multi-flavor"
- mkdir -p "$OUTPUT_DIR"
- 
  local success_count=0
  local total_count=${#SELECTED_FLAVORS[@]}
  BUILT_IPAS=()
@@ -834,12 +818,11 @@ build_multiple_ios_ipas() {
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   
   if $FLUTTER_CMD build ipa --flavor "$flavor" --dart-define=FLAVOR="$flavor"; then
-   # Find and move the IPA (iOS uses a different structure)
+   # Find the IPA (iOS uses a different structure)
    source_ipa=$(find build/ios/ipa -name "*.ipa" -type f | head -n 1)
    if [ -n "$source_ipa" ]; then
-    cp "$source_ipa" "$OUTPUT_DIR/app-${flavor}.ipa"
-    BUILT_IPAS+=("$OUTPUT_DIR/app-${flavor}.ipa:$flavor")
-    echo ":white_check_mark: IPA for $flavor saved to $OUTPUT_DIR"
+    BUILT_IPAS+=("$source_ipa:$flavor")
+    echo ":white_check_mark: IPA for $flavor built successfully"
     ((success_count++))
    else
     echo ":warning: IPA not found for $flavor"
@@ -853,7 +836,6 @@ build_multiple_ios_ipas() {
  echo "═══════════════════════════════════════"
  echo ":tada: Multi-flavor build completed!"
  echo "Success: $success_count/$total_count"
- echo "Output directory: $OUTPUT_DIR"
  echo "═══════════════════════════════════════"
  
  # Send notification
